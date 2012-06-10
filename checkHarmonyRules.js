@@ -5,11 +5,30 @@
 
 // Current feature list:
 //
-// Checks for parallel perfect 5ths and octaves, 
+// Checks are based on pp. 5, 6 & 7 of the textbook, "First Year Harmony," by William Lovelock.
+//    Note: This plugin does NOT check whether the leading note rises to tonic in the progression V-I (p.6, 11.f).
+//    The other checks on these pages, 11.a to 11.e, 11.g, 12.a & 12.b are checked.
+//
+// Multi-voice checks:
+//   Checks for parallel perfect 5ths and octaves, 
 //    including consecutive 5ths and octaves in contrary motion,
 //    and unison to octave and octave to unison.
-//   (note: different intervals that are enharmonically equivalent 
+//   (note: different intervals that are enharmonically equivalent
 //    to a perfect 5th or octave are NOT detected).
+//  Checks for exposed 5ths and octaves.  Note: an exposed 5th between II and V is allowed
+//    by Lovelock's textbook, but this plugin will still mark it as a problem.  It is up to
+//    the composer to recognize such exposed 5ths as being acceptable.
+//
+// Single voice checks:
+//  The following errors are detected for each voice selected (or all voices if nothing was selected)
+//    All augmented intervals between one note and the next
+//    Diminished 5ths, when they are not followed by a note within the interval
+//    Leaps of a diminished 4th and 7th (if you, unlike me, are not a novice composer, you may know how to use
+//       these intervals correctly; use your discretion).
+//    Leaps of a 6th are better avoided, but should be followed by a note within the interval
+//    Octaves, when they are not preceeded and followed by a note within the interval
+//    Leaps of a 7th, 9th or larger, even with one note intervening
+//
 //    Text is written to the score above any such intervals detected to notify the
 //    user of their existence, and the notes themselves are changed to red colour.
 //    Using the undo button will easily undo all changes.
@@ -22,9 +41,22 @@
 //   If nothing is selected, the entire score is checked.
 //   Any number of voices may be checked at once, but if there are more than four voices, consecutive
 //      octaves may be more likely.
-//   For the purposes of analysis, if different voices contain simultaneous notes of different lengths,
+//   For the purposes of analysis for the MULTI-VOICE checks, if different voices contain simultaneous 
+//      notes of different lengths,
 //      the longer note(s) are treated as if they were split into shorter notes of the same length as the shortest
 //      simultaneous note.  No notes on the score itself are changed (apart from the colour of the notes).
+//   For the purposes of analysis for the SINGLE-VOICE checks, no notes are split.  Consecutive notes of the same
+//      pitch ARE TREATED AS ONE NOTE for the analysis (the score itself is not changed).  I am only a novice composer.
+//      If you think consecutive notes of the same pitch should not be treated as one, please email me at c3yvonne7@gmail.com
+//      You can also change this yourself, by finding the calls to readNextNote (almost at the end of this file), similar to the
+//          following (lines 1144, 1152 & 1165):
+//
+//        			readNextNote(curScore, voiceChkd[currVoiceChkd].cursor, selectionEnd, voiceChkd[currVoiceChkd].notes[curIdx],
+//						upToTicks, voiceChkd[currVoiceChkd].staff, voiceChkd[currVoiceChkd].voice, true);
+//
+//      ... in the section that does the single voice checks, and changing "true" to "false."  You have to change it in all three places.
+//          
+
 
 
 // 
@@ -56,7 +88,9 @@
 var moreNotesPerChord = new QColor(226,28,72);  // colour of top note of a chord with more than one note.
 var perfectFifthsColor = new QColor(226,28,72); // colour of consecutive perfect fifths
 var perfect8vaColor = new QColor(255,106,7);    // colour of consecutive octaves
-var numNotesSaved = 4;                          // for each voice, the number of notes held in memory at once.
+var seventhAndLargerColor = new QColor(123,14,127);			// colour of intervals a 7th & larger
+var errorColor = new QColor(255,106,100);			// colour of other errors
+var numNotesSaved = 6;                          // for each voice, the number of notes held in memory at once.
 var StartCheckNote = 1;
 
 // The data structure used by this plugin to check various music harmony rules.
@@ -82,6 +116,8 @@ var StartCheckNote = 1;
 //                                                     //   are combined into one rest in this data structure (the score remains unchanged).
 // voiceChkd[i].notes[j].leftoverTicks                 // Used for splitting notes into two or more shorter notes of equivalent length.
 // voiceChkd[i].notes[j].origStartTick                 // When cursor was pointing to this note, the value cursor.tick();
+// voiceChkd[i].notes[j].actualStartTick			   // The tick this note starts on. (Will be greater than origStartTick if the note has
+//													   // been split.)
 // voiceChkd[i].notes[j].note                          // Points to the note in the score (only valid if !.isEnd && !.isRest).
 //                                                     //   If this note in this voice was a chord of more than one note, .note is the 
 //                                                     /      topmost note from the chord in this voice.
@@ -159,7 +195,9 @@ function init()
 function printNoteOrRest(voiceChkd, i, j)
 {
 			print("voiceChkd[" + i + "].notes[" + j + "].isEnd = " +  voiceChkd[i].notes[j].isEnd + " .isRest = " +  voiceChkd[i].notes[j].isRest +
-			"; .thisNoteTicks = " + voiceChkd[i].notes[j].thisNoteTicks + "; leftoverTicks = " + voiceChkd[i].notes[j].leftoverTicks + "\n");
+			"; .thisNoteTicks = " + voiceChkd[i].notes[j].thisNoteTicks + "; leftoverTicks = " + voiceChkd[i].notes[j].leftoverTicks 
+			+ "; origStartTick = " + voiceChkd[i].notes[j].origStartTick + "; actualStartTick = " + voiceChkd[i].notes[j].actualStartTick 
+			);
 };
 
 // --------------------------- isPerfectFifth(note1, note2) -----------------------------------
@@ -181,6 +219,45 @@ function isPerfect8va(note1, note2)
 	return isInterval(0, 0, note1, note2);
 };
 
+// ---------------------------- isWithinInterval(intervalNote1, intervalNote2, testNote) -------------
+// See whether a note is within an interval.
+function isWithinInterval(intervalNote1, intervalNote2, testNote)
+{
+	var lowNote = intervalNote1;
+	var highNote = intervalNote2;
+	if(lowNote.pitch > highNote.pitch)
+	{
+		lowNote = intervalNote2;
+		highNote = intervalNote1;
+	}
+	if (testNote.pitch > lowNote.pitch && testNote.pitch < highNote.pitch)
+	{
+		return true;
+	} else {
+		return false;
+	}
+		
+};
+
+//----------------------------- isIntervalType(letterDiff, note1, note2) -----------------------
+// See whether the letter names of the two notes are
+// letterDiff letters apart; e.g. isIntervalType(4, note1, note2) checks for a fifth of some kind.
+function isIntervalType(letterDiff, note1, note2)
+{
+	var nameDiff = 0;
+	if(note1.pitch > note2.pitch)
+	{
+		nameDiff = (7 + noteName(note1.tpc) - noteName(note2.tpc)) % 7;
+	} else {
+		nameDiff = (7 + noteName(note2.tpc) - noteName(note1.tpc)) % 7;
+	}
+	if (nameDiff == letterDiff )
+	{
+		return true;
+	} else {
+		return false;
+	}
+};
 
 // ---------------------------- isInterval(semitoneDiff, letterDiff, note1, note2) -------------
 // See whether the given notes are semitoneDiff semitones apart, and whether the letter names are
@@ -212,6 +289,22 @@ function isInterval(semitoneDiff, letterDiff, note1, note2)
 	} else {
 		return false;
 	}
+};
+
+function writeErrorToScore4Notes2Voices(curScore, voiceChkd, errorString, v1, v2, i, j, thisErrorColor)
+{
+		var myText = new Text(curScore);
+		myText.yOffset = -4.00;
+		myText.xOffset = 0.00;
+		myText.text = errorString +"(s,v)=(" + 
+						(voiceChkd[v1].staff+1)+","+(voiceChkd[v1].voice+1) + ")&(" +
+						(voiceChkd[v2].staff+1)+","+(voiceChkd[v2].voice+1)+")";
+		voiceChkd[v1].cursorCurNote.putStaffText(myText);
+		voiceChkd[v1].notes[i].note.color = new QColor(thisErrorColor);
+		voiceChkd[v1].notes[j].note.color = new QColor(thisErrorColor);
+		voiceChkd[v2].notes[i].note.color = new QColor(thisErrorColor);
+		voiceChkd[v2].notes[j].note.color = new QColor(thisErrorColor);
+	
 };
   
 // --------------------------- checkParallelPerfect5thsAndOctaves -----------------------------
@@ -250,15 +343,7 @@ function checkParallelPerfect5thsAndOctaves(curScore, voiceChkd, totalVoicesChkd
 						{
 							// print(" true = Perfect 5ths\n");
 							// We have parallel perfect fifths. Mark it on the score & make the notes red.
-							var myText = new Text(curScore);
-							myText.yOffset = -4.00;
-							myText.xOffset = 0.00;
-							myText.text = "Consecutive 5ths";
-							voiceChkd[v1].cursorCurNote.putStaffText(myText);
-							voiceChkd[v1].notes[i].note.color = new QColor(perfectFifthsColor);
-							voiceChkd[v1].notes[j].note.color = new QColor(perfectFifthsColor);
-							voiceChkd[v2].notes[i].note.color = new QColor(perfectFifthsColor);
-							voiceChkd[v2].notes[j].note.color = new QColor(perfectFifthsColor);
+							writeErrorToScore4Notes2Voices(curScore, voiceChkd, "Consecutive 5ths\n", v1, v2, i, j, perfectFifthsColor);
 						}
 						if (
 					        (isPerfect8va(voiceChkd[v1].notes[i].note, voiceChkd[v2].notes[i].note)) 
@@ -267,15 +352,7 @@ function checkParallelPerfect5thsAndOctaves(curScore, voiceChkd, totalVoicesChkd
 						{
 							// print(" true = Perfect 8va\n");
 							// We have parallel perfect octaves. Mark it on the score & make the notes red.
-							var myText = new Text(curScore);
-							myText.yOffset = -4.00;
-							myText.xOffset = 0.00;
-							myText.text = "Consecutive octaves";
-							voiceChkd[v1].cursorCurNote.putStaffText(myText);
-							voiceChkd[v1].notes[i].note.color = new QColor(perfect8vaColor);
-							voiceChkd[v1].notes[j].note.color = new QColor(perfect8vaColor);
-							voiceChkd[v2].notes[i].note.color = new QColor(perfect8vaColor);
-							voiceChkd[v2].notes[j].note.color = new QColor(perfect8vaColor);
+							writeErrorToScore4Notes2Voices(curScore, voiceChkd, "Consecutive octaves\n", v1, v2, i, j, perfect8vaColor);
 						}
 
 					}
@@ -285,6 +362,255 @@ function checkParallelPerfect5thsAndOctaves(curScore, voiceChkd, totalVoicesChkd
 		} // end for v2
 	} // end for v1
 };
+
+// --------------------------- checkExposedPerfect5thsAndOctaves -----------------------------
+function checkExposedPerfect5thsAndOctaves(curScore, voiceChkd, v1, v2, i, j)
+{
+	// i & j are the indexes of the two chords to check in voiceChkd.
+	// Typically, j = i+1, unless there is a "passing note" between i & j.
+	// NOTE: Detection of passing notes is not yet implemented, so curently j = i+1 when
+	// this function is called.
+	// v1 is the soprano voice index, and v2 is the bass voice index.
+
+	// Make sure there is a note to check at each position we are trying to check.
+	if ( (!voiceChkd[v1].notes[i].isEnd) && (!voiceChkd[v1].notes[j].isEnd) 
+		&& (!voiceChkd[v2].notes[i].isEnd) && (!voiceChkd[v2].notes[j].isEnd) )
+	{
+		if ( (!voiceChkd[v1].notes[i].isRest) && (!voiceChkd[v1].notes[j].isRest) 
+			&& (!voiceChkd[v2].notes[i].isRest) && (!voiceChkd[v2].notes[j].isRest) )
+		{
+			// Now we know the notes are notes and not rests or past the end of the score.
+			// Check whether there are parallel perfect fifths/octaves between the notes at j.
+			// If the notes are not identical, make sure they are not perfect fifths/octaves.
+			// If both v1 notes are the same, and both v2 notes are the same, nothing is done.
+
+			if  ( (voiceChkd[v1].notes[i].note.pitch != voiceChkd[v1].notes[j].note.pitch) 
+				|| (voiceChkd[v2].notes[i].note.pitch != voiceChkd[v2].notes[j].note.pitch)
+				)
+			{
+				if (
+					(isPerfectFifth(voiceChkd[v1].notes[j].note, voiceChkd[v2].notes[j].note)) // a perfect 5th and
+					&& (!isIntervalType(1, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note)) // Not a step in the soprano
+					&& ( (   (voiceChkd[v1].notes[i].note.pitch > voiceChkd[v1].notes[j].note.pitch) // Similar motion approach
+					      && (voiceChkd[v2].notes[i].note.pitch > voiceChkd[v2].notes[j].note.pitch)
+						  ) 
+						||
+						 (   (voiceChkd[v1].notes[i].note.pitch < voiceChkd[v1].notes[j].note.pitch)
+					      && (voiceChkd[v2].notes[i].note.pitch < voiceChkd[v2].notes[j].note.pitch)
+						  )
+						)
+					)
+				{
+					//print("exposed 5th");
+					writeErrorToScore4Notes2Voices(curScore, voiceChkd, "Exposed 5th\n", v1, v2, i, j, perfectFifthsColor);
+				}
+				if (
+					(isPerfect8va(voiceChkd[v1].notes[j].note, voiceChkd[v2].notes[j].note)) // a perfect octave and
+					&& (!isIntervalType(1, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note)) // Not a step in the soprano
+					&& ( (   (voiceChkd[v1].notes[i].note.pitch > voiceChkd[v1].notes[j].note.pitch) // Similar motion approach
+					      && (voiceChkd[v2].notes[i].note.pitch > voiceChkd[v2].notes[j].note.pitch)
+						  ) 
+						||
+						 (   (voiceChkd[v1].notes[i].note.pitch < voiceChkd[v1].notes[j].note.pitch)
+					      && (voiceChkd[v2].notes[i].note.pitch < voiceChkd[v2].notes[j].note.pitch)
+						  )
+						)
+					)
+				{
+					//print("exposed 8va");
+					writeErrorToScore4Notes2Voices(curScore, voiceChkd, "Exposed octaves\n", v1, v2, i, j, perfect8vaColor);
+				}
+
+			}
+
+		} // end if not isRest for each note
+	} // end if not isEnd for each note
+
+};
+
+//----------------------------
+function writeErrorToScore1Voice(curScore, voiceChkd, errorString, v1, i, j, k, thisErrorColor)
+{
+		var myText = new Text(curScore);
+		myText.yOffset = -4.00;
+		myText.xOffset = 0.00;
+		myText.text = errorString +"v=" +(voiceChkd[v1].voice+1);
+						
+		voiceChkd[v1].cursorCurNote.putStaffText(myText);
+		voiceChkd[v1].notes[i].note.color = new QColor(thisErrorColor);
+		voiceChkd[v1].notes[j].note.color = new QColor(thisErrorColor);
+		voiceChkd[v1].notes[k].note.color = new QColor(thisErrorColor);
+};
+  
+// --------------------------- checkSingleVoiceIntervals -----------------------------
+function checkSingleVoiceIntervals(curScore, voiceChkd, v1, i,j,k)
+{
+	// i, j & k are the indexes of the two (i&j) or three (i,j&k) notes to check in voiceChkd[v1].
+	// Typically, j = i+1, k=j+1.
+	// NOTE: Detection of passing notes is not yet implemented, so curently j = i+1 when
+	// this function is called.
+	// THE CALLING FUNCTION GUARANTEES (!voiceChkd[v1].notes[i].isEnd) && (!voiceChkd[v1].notes[j].isEnd)
+	// There is no guarantee for voiceChkd[v1].notes[k].isEnd
+
+	if ( (!voiceChkd[v1].notes[i].isRest) && (!voiceChkd[v1].notes[j].isRest) 
+	   )
+	{
+		// Now we know the notes are notes and not rests or past the end of the score.
+		// Check whether there are forbidden intervals between the notes,
+		// if the notes are not identical.
+
+		if  ( (voiceChkd[v1].notes[i].note.pitch != voiceChkd[v1].notes[j].note.pitch) 
+		    )
+		{
+			//---------------------------------------------------------------------------------------------
+			// check for: augmented 2nd (3,1), aug. 4th (6,3), aug 5th (8,4)
+			if (   isInterval(1, 0, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note) // aug. unison/8va
+			    || isInterval(3, 1, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note) // aug. 2nd
+				|| isInterval(5, 2, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note) // aug. 3rd
+				|| isInterval(6, 3, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note) // aug. 4th
+				|| isInterval(8, 4, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note) // aug. 5th
+				|| isInterval(10, 5, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note) // aug. 6th
+				|| isInterval(12, 6, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note) // aug. 7th
+			   )
+			{
+				// print(" true = Augmented interval\n");
+				// We have an illegal augmented interval. Mark it on the score & make the notes red.
+				writeErrorToScore1Voice(curScore, voiceChkd, "Augmented interval\n", v1, i, j, j, errorColor);
+			}
+			//---------------------------------------------------------------------------------------------
+			// check for diminished 5th: they must be followed by a note within the interval.
+			if (
+			        isInterval(6, 4, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note) 
+			   )
+			{
+				// print(" true = Diminished 5th\n");
+				// We have a diminished 5th.  Check if the following note is within the interval.
+				if(!voiceChkd[v1].notes[k].isEnd && !voiceChkd[v1].notes[k].isRest)
+				{
+					if(!isWithinInterval(voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note, voiceChkd[v1].notes[k].note))
+					{
+						writeErrorToScore1Voice(curScore, voiceChkd, "Dim 5th should be followed by\nnote within interval ", 
+						v1, i, j, k, errorColor);
+					}
+				}
+									
+			}
+			//---------------------------------------------------------------------------------------------
+			// Check for dim. 4th & 7th - they are to be avoided for present.
+			if (   isInterval(4, 3, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note) // dim. 4th
+			    || isInterval(9, 6, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note) // dim. 7th
+			   )
+			{
+				// print(" true = Diminished 4th or 7th\n");
+				writeErrorToScore1Voice(curScore, voiceChkd, "Dim. 4th or 7th \n avoid for now ", v1, i, j, j, errorColor);
+			}
+			//---------------------------------------------------------------------------------------------
+			// Check for octave - should be followed by notes within compass.
+			var lowNote = voiceChkd[v1].notes[i].note;
+			var highNote = voiceChkd[v1].notes[j].note;
+			if (lowNote.pitch > highNote.pitch)
+			{
+				lowNote = voiceChkd[v1].notes[j].note;
+				highNote = voiceChkd[v1].notes[i].note;
+			}
+			if ( (highNote.pitch - lowNote.pitch) == 12) // An octave
+			{
+				// print(" true = Octave");
+				var isOctaveOk = true;
+				if(!voiceChkd[v1].notes[k].isEnd && !voiceChkd[v1].notes[k].isRest)
+				{
+					if(!isWithinInterval(voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note, voiceChkd[v1].notes[k].note))
+					{
+						isOctaveOk = false;
+					}
+				}
+				if(!voiceChkd[v1].notes[i-1].isEnd && !voiceChkd[v1].notes[i-1].isRest)
+				{
+					if(!isWithinInterval(voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note, voiceChkd[v1].notes[i-1].note))
+					{
+						isOctaveOk = false;
+					}
+				}
+				if(!isOctaveOk)
+				{
+					writeErrorToScore1Voice(curScore, voiceChkd, "8va should be preceeded & followed\nby notes within compass", 
+					v1, i, j, j, errorColor);
+				}
+			}
+
+			//---------------------------------------------------------------------------------------------
+			// Check for dim. 6th & other 6ths.
+			// 6ths are better avoided, but if used, should be followed by note within its compass.
+			if (   isInterval(7, 5, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note) // dim. 6th
+			    || isInterval(8, 5, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note) // min. 6th
+				|| isInterval(9, 5, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note) // maj. 6th
+			   )
+			{
+				// print(" true = Dim, minor or major 6th\n");
+				if(!voiceChkd[v1].notes[k].isEnd && !voiceChkd[v1].notes[k].isRest)
+				{
+					if(!isWithinInterval(voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note, voiceChkd[v1].notes[k].note))
+					{
+						writeErrorToScore1Voice(curScore, voiceChkd, "6th better avoided, but \n should be followed by note in interval ", 
+						v1, i, j, k, errorColor);
+					}
+					else
+					{
+						writeErrorToScore1Voice(curScore, voiceChkd, "6th better avoided\n", v1, i, j, j, errorColor);
+					}
+				} else {
+					writeErrorToScore1Voice(curScore, voiceChkd, "6th better avoided, but \n should be followed by note in interval ", 
+					v1, i, j, j, errorColor);
+				}
+
+			}
+			//---------------------------------------------------------------------------------------------
+			// Check for 7th & 9th & larger - they are to be avoided.
+			var lowNote = voiceChkd[v1].notes[i].note;
+			var highNote = voiceChkd[v1].notes[j].note;
+			if (lowNote.pitch > highNote.pitch)
+			{
+				lowNote = voiceChkd[v1].notes[j].note;
+				highNote = voiceChkd[v1].notes[i].note;
+			}
+			if (   isInterval(10, 6, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note) // min. 7th
+			    || isInterval(11, 6, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[j].note) // maj. 7th
+				|| ((highNote.pitch - lowNote.pitch) > 12) // Larger than 8th
+		       )
+			{
+				// print(" true = 7th, 9th or larger interval\n");
+				// We have a 7th, 9th or larger interval.
+				writeErrorToScore1Voice(curScore, voiceChkd, "No 7ths, 9ths or larger intervals\n", v1, i, j, j, seventhAndLargerColor);
+			}
+			//---------------------------------------------------------------------------------------------
+			// Check for 7th & 9th with one note in between.
+			if(!voiceChkd[v1].notes[k].isEnd && !voiceChkd[v1].notes[k].isRest)
+			{
+				if (isWithinInterval(voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[k].note, voiceChkd[v1].notes[j].note))
+				{
+					var lowNote = voiceChkd[v1].notes[i].note;
+					var highNote = voiceChkd[v1].notes[k].note;
+					if (lowNote.pitch > highNote.pitch)
+					{
+						lowNote = voiceChkd[v1].notes[k].note;
+						highNote = voiceChkd[v1].notes[i].note;
+					}
+					if (   isInterval(10, 6, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[k].note) // min. 7th
+						|| isInterval(11, 6, voiceChkd[v1].notes[i].note, voiceChkd[v1].notes[k].note) // maj. 7th
+						|| ((highNote.pitch - lowNote.pitch) > 12)
+						)
+					{
+						writeErrorToScore1Voice(curScore, voiceChkd, "No 7ths, 9ths & larger \neven with 1 note in between ", 
+						v1, i, j, k, seventhAndLargerColor);
+					}
+				}
+			}
+
+		} // end if notes are not the same
+
+	} // end if not isRest for each note
+};
+
 
 //------------------------------ printCurrentChord --------------------------
 
@@ -314,6 +640,39 @@ function printCurrentChord(voiceChkd, totalVoicesChkd)
 
 };
 
+//------------------------------ moveAllNotesOverIn1Voice ----------------------------
+function moveAllNotesOverIn1Voice(curScore, voiceChkdi, numNotesSaved)
+{
+	// Moves all notes over for a SINGLE VOICE ONLY.
+	for (var j=0; j<numNotesSaved-1; j++)
+	{
+			voiceChkdi.notes[j].isEnd = voiceChkdi.notes[j+1].isEnd;
+			if (!voiceChkdi.notes[j].isEnd)
+			{
+				voiceChkdi.notes[j].isRest = voiceChkdi.notes[j+1].isRest;
+				voiceChkdi.notes[j].origStartTick = voiceChkdi.notes[j+1].origStartTick;
+				voiceChkdi.notes[j].thisNoteTicks = voiceChkdi.notes[j+1].thisNoteTicks;
+				voiceChkdi.notes[j].leftoverTicks = voiceChkdi.notes[j+1].leftoverTicks;
+				voiceChkdi.notes[j].actualStartTick = voiceChkdi.notes[j+1].actualStartTick;
+				
+				if (!voiceChkdi.notes[j].isRest)
+				{
+					voiceChkdi.notes[j].note = voiceChkdi.notes[j+1].note;
+					
+				} 
+			}
+		}
+		// Make the cursor voiceChkdi.cursorCurNote point to the note at index 1 (i.e. index StartCheckNote).
+		if (!voiceChkdi.notes[StartCheckNote].isEnd)
+		{
+			while (voiceChkdi.cursorCurNote.tick() < voiceChkdi.notes[StartCheckNote].origStartTick)
+			{
+				voiceChkdi.cursorCurNote.next();
+			}
+		}
+
+};
+
 //------------------------------ moveAllNotesOverOneSpaceAndReadNext --------------------------
 
 function moveAllNotesOverOneSpaceAndReadNext(curScore, selectionEnd, voiceChkd, totalVoicesChkd)
@@ -326,30 +685,7 @@ function moveAllNotesOverOneSpaceAndReadNext(curScore, selectionEnd, voiceChkd, 
 	for (var i = 0; i < totalVoicesChkd; i++)
 	{
 		// Move each note over by one index.
-		for (var j = 0; j < numNotesSaved-1; j++)
-		{
-			voiceChkd[i].notes[j].isEnd = voiceChkd[i].notes[j+1].isEnd;
-			if (!voiceChkd[i].notes[j].isEnd)
-			{
-				voiceChkd[i].notes[j].isRest = voiceChkd[i].notes[j+1].isRest;
-				voiceChkd[i].notes[j].origStartTick = voiceChkd[i].notes[j+1].origStartTick;
-				voiceChkd[i].notes[j].thisNoteTicks = voiceChkd[i].notes[j+1].thisNoteTicks;
-				voiceChkd[i].notes[j].leftoverTicks = voiceChkd[i].notes[j+1].leftoverTicks;
-				if (!voiceChkd[i].notes[j].isRest)
-				{
-					voiceChkd[i].notes[j].note = voiceChkd[i].notes[j+1].note;
-					
-				} 
-			}
-		}
-		// Make the cursor voiceChkd[i].cursorCurNote point to the note at index 1 (i.e. index StartCheckNote).
-		if (!voiceChkd[i].notes[StartCheckNote].isEnd)
-		{
-			while (voiceChkd[i].cursorCurNote.tick() < voiceChkd[i].notes[StartCheckNote].origStartTick)
-			{
-				voiceChkd[i].cursorCurNote.next();
-			}
-		}
+		moveAllNotesOverIn1Voice(curScore, voiceChkd[i], numNotesSaved)
 	}
 
 	// Split the last note if necessary to make all simultaneous notes the same length, and for unsplit notes,
@@ -416,6 +752,8 @@ function makeNoteOneLenAndReadNext(curScore, selectionEnd, voiceChkd, totalVoice
 				voiceChkd[i].notes[nxtIdx].isRest = voiceChkd[i].notes[curIdx].isRest;
 				voiceChkd[i].notes[nxtIdx].origStartTick = voiceChkd[i].notes[curIdx].origStartTick;
 				voiceChkd[i].notes[nxtIdx].thisNoteTicks = voiceChkd[i].notes[curIdx].leftoverTicks;
+				voiceChkd[i].notes[nxtIdx].actualStartTick = voiceChkd[i].notes[curIdx].actualStartTick + minLen;
+				
 				voiceChkd[i].notes[nxtIdx].leftoverTicks = 0;
 				if (!voiceChkd[i].notes[nxtIdx].isRest)
 				{
@@ -423,7 +761,11 @@ function makeNoteOneLenAndReadNext(curScore, selectionEnd, voiceChkd, totalVoice
 				}
 			} else {
 				// This note/rest is the minimum length; read the next one.
-				readNextNote(curScore, voiceChkd[i].cursor, selectionEnd, voiceChkd[i].notes[nxtIdx]);
+				var upToTick = voiceChkd[i].notes[curIdx].actualStartTick + minLen;
+				//print(" make1Len upToTick = " + upToTick + " minLen " + minLen +
+				//	 "voiceChkd[i].notes[curIdx].actualStartTick " + voiceChkd[i].notes[curIdx].actualStartTick);
+				readNextNote(curScore, voiceChkd[i].cursor, selectionEnd, voiceChkd[i].notes[nxtIdx], 
+						upToTick, voiceChkd[i].staff, voiceChkd[i].voice, false);
 			}
 
 		}
@@ -432,9 +774,14 @@ function makeNoteOneLenAndReadNext(curScore, selectionEnd, voiceChkd, totalVoice
 };
 
 // ----------------------- isEndOfSelectionOrFile ------------------------------
-function isEndOfSelectionOrFile(curScore, cursor, selectionEnd)
+function isEndOfSelectionOrFile(curScore, cursor, selectionEnd, staff, voice)
 {
 	if (cursor.eos()) { return true; }
+	if ( (cursor.voice!=voice) || (cursor.staff != staff))
+	{
+		return true;
+	}
+	
 	if (selectionEnd.eos())
 	{
 		// There was no selection; we are checking the whole file:
@@ -443,103 +790,205 @@ function isEndOfSelectionOrFile(curScore, cursor, selectionEnd)
 	else
 	{
 		// There is a selection; compare with selectionEnd
-		return (cursor.tick() >= selectionEnd.tick())
+		return (!(cursor.tick() < selectionEnd.tick()));
 	}
 };
 
 
 // -------------------- FUNCTION:   readNextNote -----------------------------
 
-function readNextNote(curScore, cursor, selectionEnd, myNote)
+function readNextNote(curScore, cursor, selectionEnd, myNote, upToTick, staff, voice, joinNotes)
 {
 	// Reads the next note at the cursor into the myNote Object (i.e. myNote = voiceChkd[i].notes[j] for some i & j)
 	var myRest = new Rest();
 	var myChord = new Chord();
+	var nothingRead = true;
+	var nextThingSameType = true;
 
-	if (!isEndOfSelectionOrFile(curScore, cursor, selectionEnd))
-	{
-		myNote.isEnd = false;
-		myNote.origStartTick = cursor.tick();
-		if (cursor.isChord())
-		{
-			myNote.isRest = false;
-			var myChord = cursor.chord();
-			myNote.thisNoteTicks = myChord.tickLen;
-			myNote.leftoverTicks = 0;
-			myNote.note = myChord.topNote();
-			if (myChord.notes > 1)
-			{
-				// We are only checking one note per chord!
-				var myText = new Text(curScore);
-				myText.yOffset = -4.00;
-				myText.xOffset = 0.00;
-				myText.text = "MORE THAN ONE NOTE in staff " + (cursor.staff+1) + ", voice " + (cursor.voice+1);
-				cursor.putStaffText(myText);
-				myNote.note.color = new QColor(moreNotesPerChord);
-			} // if more than one note in chord
+	// print("upToTick = " + upToTick + " cursor.tick() = " + cursor.tick());
 
-			cursor.next();	
-		} else {
-			  myNote.isRest = true;
-			  var tmpTicks = 0;
-			  if(cursor.isRest())
-			  {
-				
-				var myRest = cursor.rest();
-				myNote.thisNoteTicks = myRest.tickLen;
-				myNote.leftoverTicks = 0;
-				cursor.next();
-			  } else {
-			    // this is neither a rest nor a note; treat it as a rest in the data structure for this plugin.
-				tmpTicks = cursor.tick();
-				cursor.next();
-				myNote.thisNoteTicks = cursor.tick() - tmpTicks;
-				myNote.leftoverTicks = 0;
-			  }
-			
-				// Combine simultaneous rests into one rest in the data structure for this plugin 
-				// (does not change rest length in score itself)
-			
-				var nextNoteIsRest = true;
-				
-
-				while (nextNoteIsRest)
-				{
-					if (!isEndOfSelectionOrFile(curScore, cursor, selectionEnd))
-					{
-						if (cursor.isRest())
-						{
-							myRest = cursor.rest();
-							myNote.thisNoteTicks = myNote.thisNoteTicks + myRest.tickLen;
-							cursor.next();
-						} else {
-							if (!cursor.isChord())
-							{
-								// This note is neither rest nor chord.  Treat it as a rest.
-								tmpTicks = cursor.tick();
-								cursor.next();
-								myNote.thisNoteTicks = myNote.thisNoteTicks + cursor.tick() - tmpTicks;
-							} else {
-								nextNoteIsRest = false;
-							}
-						}
-					} else {
-						nextNoteIsRest = false;
-					} // if not at end of selection
-				} // while nextNoteIsRest
-
-		} // if rest or chord
-	}
-	else
+	if (isEndOfSelectionOrFile(curScore, cursor, selectionEnd, staff, voice))
 	{
 		myNote.isEnd = true;
-	} // end of if (!isEndOfSelectionOrFile(curScore, cursor, selectionEnd))
+		// print("isEnd = true");
+		return;
+	}
+
+	while (!isEndOfSelectionOrFile(curScore, cursor, selectionEnd, staff, voice) && (nothingRead || nextThingSameType))
+	{
+		while ( (!isEndOfSelectionOrFile(curScore, cursor, selectionEnd, staff, voice))
+		    && (!cursor.isChord() )
+			&& (!cursor.isRest()  )
+			)
+		{
+			cursor.next();
+		}
+		if (isEndOfSelectionOrFile(curScore, cursor, selectionEnd, staff, voice))
+		{
+			myNote.isEnd = true;
+			// print("isEnd = true");
+			return;
+		}
+
+		if (cursor.tick() < upToTick)
+		{
+			while ((cursor.tick() < upToTick))
+			{
+				print("ERROR....");
+				if (cursor.isChord() || cursor.isRest())
+				{
+					print("ERROR: Next chord or rest starts before existing one finishes. upToTick = " + upToTick
+					+ " next cursor tick = " + cursor.tick() + " cursor.isRest = " + cursor.isRest() + "cursor.isChord = " + cursor.isChord());
+					print("selectionEnd.tick() = " + selectionEnd.tick());
+				}
+				cursor.next();
+				if ( isEndOfSelectionOrFile(curScore, cursor, selectionEnd, staff, voice) )
+				{
+					if(nothingRead) {
+						 myNote.isEnd = true; 
+					}
+					return; 
+				}
+			} // end while
+		} // end if (cursor.tick < upToTick)
+
+		if (nothingRead)
+		{
+			myNote.isEnd = false;
+			myNote.leftoverTicks = 0;
+			myNote.origStartTick = upToTick;
+			myNote.actualStartTick = upToTick;
+			//print(upToTick);
+
+		}
+		if (cursor.tick() > upToTick)
+		{
+			if(nothingRead)
+			{
+				myNote.isRest = true;
+				myNote.thisNoteTicks = cursor.tick() - upToTick;
+				upToTick = cursor.tick();
+				nothingRead = false;
+			}
+			else if (myNote.isRest)
+			{
+				myNote.thisNoteTicks = cursor.tick() - myNote.actualStartTick;
+				upToTick = cursor.tick();
+			}
+			else
+			{
+				nextThingSameType = false;
+			}
+			
+		} else { // we have cursor.tick() == upToTick
+
+			if (cursor.isChord())
+			{
+				myChord = cursor.chord();
+				var tmpNote = myChord.topNote();
+				if (myChord.notes > 1)
+				{
+					// We are only checking one note per chord!
+					var myText = new Text(curScore);
+					myText.yOffset = -4.00;
+					myText.xOffset = 0.00;
+					myText.text = "MORE THAN ONE NOTE in staff " + (cursor.staff+1) + ", voice " + (cursor.voice+1);
+					cursor.putStaffText(myText);
+					tmpNote.color = new QColor(moreNotesPerChord);
+				} // if more than one note in chord
+				
+				
+				if (nothingRead)
+				{
+					myNote.isRest = false;
+					myNote.thisNoteTicks = myChord.tickLen;
+					myNote.note = tmpNote;
+					upToTick = myNote.actualStartTick + myNote.thisNoteTicks;
+					nothingRead = false;
+					cursor.next();
+				} else
+				{
+					if(joinNotes && (myNote.isRest == false) && (tmpNote.pitch == myNote.note.pitch))
+					{
+						myNote.thisNoteTicks = myNote.thisNoteTicks + myChord.tickLen;
+						upToTick = myNote.actualStartTick + myNote.thisNoteTicks;
+						cursor.next();
+					}
+					else
+					{
+						nextThingSameType = false;
+					}
+				}
+			} // end if cursor.isChord()
+			else {
+				if (nothingRead || myNote.isRest)
+				{
+					myNote.isRest = true;
+					if(cursor.isRest())
+					{
+						//print("Real rest");
+						var myRest = cursor.rest();
+						if(nothingRead)
+						{
+							myNote.thisNoteTicks = myRest.tickLen;
+						} else
+						{
+							myNote.thisNoteTicks = myNote.thisNoteTicks + myRest.tickLen;
+						}
+						upToTick = myNote.actualStartTick + myNote.thisNoteTicks;
+						cursor.next();
+
+					} else {
+						// this is neither a rest nor a note; treat it as a rest in the data structure for this plugin.
+						//print("Neither rest nor note.");
+						print("ERROR: SHOULD NEVER GET HERE AS ALL NOTES THAT AREN'T CHORDS OR RESTS SHOULD BE FFD AT BEGINNING");
+						cursor.next();
+						myNote.thisNoteTicks = cursor.tick() - myNote.actualStartTick;
+						upToTick = cursor.tick();
+					}
+				} else
+				{
+					nextThingSameType = false;
+				}
+			} // end if (cursor.tick() > upToTick) else ...
+	
+		} // end if (cursor.tick() > upToTick) else....
+
+		nothingRead = false;
+		if (myNote.thisNoteTicks == 0)
+		{
+			nothingRead = true;
+		}
+
+	} // end while (!isEndOfSelectionOrFile(curScore, cursor, selectionEnd, staff, voice) && (nothingRead || nextThingSameType))
 };
+
+//------------------------------ rewindCursors ----------------------------------------
+function rewindCursors(voiceChkd, currVoiceChkd)
+{
+	// Puts the cursors for the given voice at the start of the selection, or if no selection,
+	// at the beginning of the score.
+	voiceChkd[currVoiceChkd].cursor.staff = voiceChkd[currVoiceChkd].staff;
+	voiceChkd[currVoiceChkd].cursorCurNote.staff = voiceChkd[currVoiceChkd].staff;
+	voiceChkd[currVoiceChkd].cursor.goToSelectionStart();
+	voiceChkd[currVoiceChkd].cursorCurNote.goToSelectionStart();
+	if(voiceChkd[currVoiceChkd].cursorCurNote.eos())
+	{
+		voiceChkd[currVoiceChkd].cursorCurNote.rewind();
+		voiceChkd[currVoiceChkd].cursor.rewind();
+	}
+	voiceChkd[currVoiceChkd].cursor.staff = voiceChkd[currVoiceChkd].staff;
+	voiceChkd[currVoiceChkd].cursorCurNote.staff = voiceChkd[currVoiceChkd].staff;
+	voiceChkd[currVoiceChkd].cursor.voice = voiceChkd[currVoiceChkd].voice; // voice must be set after goto.
+	voiceChkd[currVoiceChkd].cursorCurNote.voice = voiceChkd[currVoiceChkd].voice;
+
+}
+
 
 // -----------------------------  run -------------------------------------------------
 
 function run() 
-	{
+{
 	
 	if (typeof curScore === 'undefined')
             return;
@@ -609,53 +1058,56 @@ function run()
 								voiceChkd[currVoiceChkd].voice = cursor.voice;
 								voiceChkd[currVoiceChkd].cursor = new Cursor(curScore);
 								voiceChkd[currVoiceChkd].cursorCurNote = new Cursor(curScore);
-								voiceChkd[currVoiceChkd].cursor.staff = staff;
-								voiceChkd[currVoiceChkd].cursorCurNote.staff = staff;
-								voiceChkd[currVoiceChkd].cursor.goToSelectionStart();
-								voiceChkd[currVoiceChkd].cursorCurNote.goToSelectionStart();
-								voiceChkd[currVoiceChkd].cursor.staff = voiceChkd[currVoiceChkd].staff;
-								voiceChkd[currVoiceChkd].cursorCurNote.staff = staff;
-								voiceChkd[currVoiceChkd].cursor.voice = voiceChkd[currVoiceChkd].voice; // voice must be set after goto.
-								voiceChkd[currVoiceChkd].cursorCurNote.voice = voiceChkd[currVoiceChkd].voice;
-								if(voiceChkd[currVoiceChkd].cursorCurNote.eos())
-								{
-									voiceChkd[currVoiceChkd].cursorCurNote.rewind();
-									voiceChkd[currVoiceChkd].cursor.rewind();
-								}
+								rewindCursors(voiceChkd, currVoiceChkd);
 
 								voiceChkd[currVoiceChkd].notes = new Array();
 								for(var i=0; i<numNotesSaved; i++)
 								{
 								    voiceChkd[currVoiceChkd].notes[i] = new Object();
 								} //end for i
-								voiceChkd[currVoiceChkd].notes[0].isEnd = true;
-								readNextNote(curScore, voiceChkd[currVoiceChkd].cursor, selectionEnd, voiceChkd[currVoiceChkd].notes[1]);
+								for (var curIdx = 0;curIdx < StartCheckNote; curIdx++)
+								{
+									voiceChkd[currVoiceChkd].notes[curIdx].isEnd = true;
+								}
+								//print(" upToTick = voiceChkd[currVoiceChkd].cursor.tick() = " + voiceChkd[currVoiceChkd].cursor.tick());
+								var upToTick = voiceChkd[currVoiceChkd].cursor.tick();
+								readNextNote(curScore, voiceChkd[currVoiceChkd].cursor, selectionEnd, voiceChkd[currVoiceChkd].notes[StartCheckNote],
+									upToTick, voiceChkd[currVoiceChkd].staff, voiceChkd[currVoiceChkd].voice, false);
 																
 								currVoiceChkd=currVoiceChkd+1;
-								cursor.goToSelectionEnd();
 								stopChecking = true;
 							}
 						cursor.next();
-						stopChecking = stopChecking || isEndOfSelectionOrFile(curScore, cursor, selectionEnd);
+						stopChecking = stopChecking || isEndOfSelectionOrFile(curScore, cursor, selectionEnd, staff, v);
 					} // end while
-                  } //end for v
-            } // end for staff
-			totalVoicesChkd = currVoiceChkd;
+            } //end for v
+       } // end for staff
+		totalVoicesChkd = currVoiceChkd;
 
+		if(totalVoicesChkd > 1)
+		{
 			// Read two more notes per voice; Saved note 0 of the voice is blank; Saved note 1 is read, but lengths may be different.
 			// Thus we must compare lengths, shift parts of notes that are too long into the next saved note, and read any extra notes.
-			var curIdx = 1;
+			var curIdx = StartCheckNote;
 			for (var nxtIdx = curIdx + 1; nxtIdx < numNotesSaved; nxtIdx++)
 			{
 				makeNoteOneLenAndReadNext(curScore, selectionEnd, voiceChkd, totalVoicesChkd, curIdx, nxtIdx);
 				curIdx++;
 			}
+			// print("Hi!");
+			for (var i=0; i<numNotesSaved; i++)
+			{
+				for (var j=0; j<totalVoicesChkd; j++)
+				{
+					//printNoteOrRest(voiceChkd, j, i);
+				}
+				//print("-----");
+			}
 
-
-			// While there are still notes to check, do all the required checks and move along one note.
+			// While there are still notes to check, do all the required multi-voice checks and move along one note.
 			var finished = false;
 			while (!finished) {
-				// Check whether there are any notes left to check:
+			// Check whether there are any notes left to check:
 				finished = true;
 				for (var i = 0; i<totalVoicesChkd; i++)
 				{
@@ -668,14 +1120,55 @@ function run()
 				{
 					//printCurrentChord(voiceChkd, totalVoicesChkd);
 					// Do required checks:
-					checkParallelPerfect5thsAndOctaves(curScore, voiceChkd, totalVoicesChkd, StartCheckNote, StartCheckNote+1)
+	// ------ MULTI-VOICE CHECKS HERE !
+					checkParallelPerfect5thsAndOctaves(curScore, voiceChkd, totalVoicesChkd, StartCheckNote, StartCheckNote+1);
+					checkExposedPerfect5thsAndOctaves(curScore, voiceChkd, 0, totalVoicesChkd-1, StartCheckNote, StartCheckNote+1);
 
 					// Move along one note:
 					moveAllNotesOverOneSpaceAndReadNext(curScore, selectionEnd, voiceChkd, totalVoicesChkd);
 				}
 			} // end while
+		} // end if at least 2 voices to check
 
-	};
+		// Do single voice checks
+		for (currVoiceChkd=0; currVoiceChkd<totalVoicesChkd; currVoiceChkd++)
+		{
+			rewindCursors(voiceChkd, currVoiceChkd);
+			for (var curIdx = 0;curIdx < StartCheckNote; curIdx++)
+			{
+				voiceChkd[currVoiceChkd].notes[curIdx].isEnd = true;
+			}
+			// Read 3 more notes for this voice; Saved note 0 of the voice is blank.
+			var upToTicks = voiceChkd[currVoiceChkd].cursor.tick();
+			// print("Starting read of notes at tick " + upToTicks);
+			readNextNote(curScore, voiceChkd[currVoiceChkd].cursor, selectionEnd, voiceChkd[currVoiceChkd].notes[curIdx],
+						upToTicks, voiceChkd[currVoiceChkd].staff, voiceChkd[currVoiceChkd].voice, true);
+
+			for (var curIdx = StartCheckNote+1; curIdx < numNotesSaved; curIdx++)
+			{
+				upToTicks = voiceChkd[currVoiceChkd].notes[curIdx-1].actualStartTick 
+					          + voiceChkd[currVoiceChkd].notes[curIdx-1].thisNoteTicks;
+				//print(" upToTicks =" + upToTicks);
+				readNextNote(curScore, voiceChkd[currVoiceChkd].cursor, selectionEnd, voiceChkd[currVoiceChkd].notes[curIdx],
+						upToTicks, voiceChkd[currVoiceChkd].staff, voiceChkd[currVoiceChkd].voice, true);
+			}
+			
+			while ((!voiceChkd[currVoiceChkd].notes[StartCheckNote].isEnd) && (!voiceChkd[currVoiceChkd].notes[StartCheckNote+1].isEnd)) 
+			{
+	// ------ SINGLE VOICE CHECKS HERE !
+				checkSingleVoiceIntervals(curScore, voiceChkd, currVoiceChkd, StartCheckNote, StartCheckNote+1, StartCheckNote+2);
+				moveAllNotesOverIn1Voice(curScore, voiceChkd[currVoiceChkd], numNotesSaved);
+				
+				upToTicks = voiceChkd[currVoiceChkd].notes[numNotesSaved-2].actualStartTick 
+						  + voiceChkd[currVoiceChkd].notes[numNotesSaved-2].thisNoteTicks;
+
+				readNextNote(curScore, voiceChkd[currVoiceChkd].cursor, selectionEnd, voiceChkd[currVoiceChkd].notes[numNotesSaved-1],
+							upToTicks, voiceChkd[currVoiceChkd].staff, voiceChkd[currVoiceChkd].voice, true);
+			}
+		}
+
+
+};
 	
 function close() 
 	{
@@ -689,8 +1182,10 @@ var mscorePlugin =
 	init: init,   
 	run: run,   
 	onClose: close
-}; 
+};
 
 mscorePlugin;
+
+
 
 
